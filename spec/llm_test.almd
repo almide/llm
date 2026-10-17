@@ -1,0 +1,273 @@
+// The SSE translations, fed canned transcripts in every chunking: whole, one
+// codepoint at a time, and cut inside an event and inside a character. The
+// OpenAI transcript is the one the compiler's tests/http_sse_cross_test.rs
+// pinned for the former `http.openai_streaming_call`; the expected JSON is
+// that test's, byte for byte.
+import self.sse
+import self.openai
+import self.anthropic
+
+// ── harness ──
+// Feed `chunks` through `feed`; answer the final JSON and the deltas.
+effect fn drive(chunks: List[String], feed: (sse.Stream, String, (String) -> Unit) -> sse.Stream) -> (String, List[String]) = {
+  var deltas: List[String] = []
+  let s = chunks |> list.fold(
+    sse.start(),
+    (s, c) => feed(s, c, (d) => {
+      deltas = deltas + [d]
+    }),
+  )
+  (sse.final_json(s.acc), deltas)
+}
+
+effect fn run_openai(chunks: List[String]) -> (String, List[String]) = drive(
+  chunks,
+  (s, c, f) => openai.feed(s, c, f),
+)!
+
+effect fn run_anthropic(chunks: List[String]) -> (String, List[String]) = drive(
+  chunks,
+  (s, c, f) => anthropic.feed(s, c, f),
+)!
+
+// One codepoint per chunk.
+fn by_char(s: String) -> List[String] = string.chars(s)
+
+// Cut at each codepoint offset in `cuts` (ascending).
+fn cut_at(s: String, cuts: List[Int]) -> List[String] = {
+  let ends = cuts + [string.len(s)]
+  let starts = [0] + cuts
+  list.zip(starts, ends) |> list.map(((a, b)) => string.slice(s, a, b))
+}
+
+fn every_chunking(s: String) -> List[List[String]] = [
+  [s],
+  by_char(s),
+  cut_at(s, [10, string.len(s) / 3, string.len(s) / 2]),
+  cut_at(s, [1, 2, 3, string.len(s) - 2, string.len(s) - 1])
+]
+
+fn ev(name: String, data: String) -> String = "event: ${name}\ndata: ${data}\n\n"
+
+// ── OpenAI-compatible ──
+// Deltas with multibyte text, a tool call whose arguments arrive in
+// fragments, a call at index 2 (growing the list past a gap), an event with
+// no data, usage with a Float count, `[DONE]`, and an event after it that
+// must not be applied.
+let OPENAI = [
+  "data: {\"model\":\"m-1\",\"choices\":[{\"delta\":{\"content\":\"h\u{e9}llo\"}}]}\n\n",
+  "data: {\"choices\":[{\"delta\":{\"content\":\" w\u{f6}rld \u{1f600}\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_w\",\"arguments\":\"{\\\"ci\"}}]}}]}\n\n",
+  "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ty\\\":\\\"x\\\"}\"}},{\"index\":2,\"id\":\"c3\",\"function\":{\"name\":\"n3\",\"arguments\":\"\\u0001\\n\\\"q\\\"\"}}]}}]}\n\n",
+  "event: ping\n\n",
+  "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7.9}}\n\n",
+  "data: [DONE]\n\n",
+  "data: {\"choices\":[{\"delta\":{\"content\":\"AFTER\"}}]}\n\n"
+] |> list.join("")
+
+let OPENAI_JSON = "{\"content\":\"h\u{e9}llo w\u{f6}rld \u{1f600}\",\"model\":\"m-1\",\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12},\"finish_reason\":\"tool_calls\",\"tool_calls\":[{\"id\":\"call_1\",\"name\":\"get_w\",\"arguments\":\"{\\\"city\\\":\\\"x\\\"}\"},{\"id\":\"\",\"name\":\"\",\"arguments\":\"\"},{\"id\":\"c3\",\"name\":\"n3\",\"arguments\":\"\\u0001\\n\\\"q\\\"\"}]}"
+
+test "openai: the transcript accumulates to the pinned JSON in every chunking" {
+  for chunks in every_chunking(OPENAI) {
+    let (j, deltas) = run_openai(chunks)!
+    assert_eq(j, OPENAI_JSON)
+    assert_eq(deltas, ["h\u{e9}llo", " w\u{f6}rld \u{1f600}"])
+  }
+}
+
+test "openai: an event after [DONE] in the same chunk is not applied" {
+  let stream = "data: {\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"kept\"}}]}\n\ndata: [DONE]\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" AFTER\"}}]}\n\n"
+  let (j, deltas) = run_openai([stream])!
+  assert_eq(deltas, ["kept"])
+  assert_eq(
+    j,
+    "{\"content\":\"kept\",\"model\":\"m\",\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0},\"finish_reason\":\"\",\"tool_calls\":[]}",
+  )
+}
+
+test "openai: nothing in a later chunk is applied after [DONE]" {
+  let (j, deltas) = run_openai([
+    "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata:  [DONE] \n\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"
+  ])!
+  assert_eq(deltas, ["a"])
+  assert(string.contains(j, "\"content\":\"a\""))
+}
+
+test "openai: a reported total is kept, multi-line data joins with a newline, bad JSON is skipped" {
+  let stream = [
+    "data: not json\n\n",
+    "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":9},\n",
+    "data: \"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+    ": comment\nid: 3\n\n"
+  ] |> list.join("")
+  let (j, deltas) = run_openai([stream])!
+  assert_eq(deltas, ["x"])
+  assert_eq(
+    j,
+    "{\"content\":\"x\",\"model\":\"\",\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":9},\"finish_reason\":\"\",\"tool_calls\":[]}",
+  )
+}
+
+test "openai: an unterminated last event is not applied" {
+  let (j, deltas) = run_openai([
+    "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n"
+  ])!
+  assert_eq(deltas, ["a"])
+  assert(string.contains(j, "\"content\":\"a\""))
+}
+
+test "openai: CRLF line endings frame data lines" {
+  let (j, deltas) = run_openai([
+    "data: {\"choices\":[{\"delta\":{\"content\":\"r\"}}]}\r\n\n"
+  ])!
+  assert_eq(deltas, ["r"])
+  assert(string.contains(j, "\"content\":\"r\""))
+}
+
+test "openai: url and headers" {
+  assert_eq(openai.url("http://h/v1//"), "http://h/v1/chat/completions")
+  assert_eq(openai.url("https://api.openai.com/v1"), "https://api.openai.com/v1/chat/completions")
+  let h = openai.headers("k-1")
+  assert_eq(map.get(h, "Authorization"), some("Bearer k-1"))
+  assert_eq(map.get(h, "Content-Type"), some("application/json"))
+  assert_eq(map.get(h, "Accept"), some("text/event-stream"))
+  assert_eq(map.len(h), 3)
+}
+
+// ── Anthropic Messages ──
+// A text block, a ping, a tool_use block at index 1 whose arguments arrive
+// as input_json_delta fragments, an inlined `input` that is not read, and
+// the stop reason and output count in message_delta.
+let ANTHROPIC = [
+  ev(
+    "message_start",
+    "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-x\",\"stop_reason\":null,\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}",
+  ),
+  ev(
+    "content_block_start",
+    "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+  ),
+  ev("ping", "{\"type\":\"ping\"}"),
+  ev(
+    "content_block_delta",
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"H\u{e9}llo\"}}",
+  ),
+  ev(
+    "content_block_delta",
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" w\u{f6}rld \u{1f600}\"}}",
+  ),
+  ev(
+    "content_block_delta",
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}",
+  ),
+  ev("content_block_stop", "{\"type\":\"content_block_stop\",\"index\":0}"),
+  ev(
+    "content_block_start",
+    "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_weather\",\"input\":{\"ignored\":true}}}",
+  ),
+  ev(
+    "content_block_delta",
+    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}",
+  ),
+  ev(
+    "content_block_delta",
+    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\": \"}}",
+  ),
+  ev(
+    "content_block_delta",
+    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"Par\u{ee}s\\\"}\"}}",
+  ),
+  ev("content_block_stop", "{\"type\":\"content_block_stop\",\"index\":1}"),
+  ev(
+    "message_delta",
+    "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":89}}",
+  ),
+  ev("message_stop", "{\"type\":\"message_stop\"}")
+] |> list.join("")
+
+let ANTHROPIC_JSON = "{\"content\":\"H\u{e9}llo w\u{f6}rld \u{1f600}\",\"model\":\"claude-x\",\"usage\":{\"prompt_tokens\":25,\"completion_tokens\":89,\"total_tokens\":114},\"finish_reason\":\"tool_use\",\"tool_calls\":[{\"id\":\"\",\"name\":\"\",\"arguments\":\"\"},{\"id\":\"toolu_1\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Par\u{ee}s\\\"}\"}]}"
+
+test "anthropic: the transcript accumulates to the LLM-response JSON in every chunking" {
+  for chunks in every_chunking(ANTHROPIC) {
+    let (j, deltas) = run_anthropic(chunks)!
+    assert_eq(j, ANTHROPIC_JSON)
+    assert_eq(deltas, ["H\u{e9}llo", " w\u{f6}rld \u{1f600}"])
+  }
+}
+
+test "anthropic: an error event reaches the callback, not the content" {
+  let stream = ev("message_start", "{\"message\":{\"model\":\"m\"}}") + ev(
+    "error",
+    "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+  ) + ev("error", "{\"error\":{\"message\":\"\"}}")
+  let (j, deltas) = run_anthropic([stream])!
+  assert_eq(deltas, ["[anthropic stream error] Overloaded"])
+  assert_eq(
+    j,
+    "{\"content\":\"\",\"model\":\"m\",\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0},\"finish_reason\":\"\",\"tool_calls\":[]}",
+  )
+}
+
+test "anthropic: [DONE] does not end the stream and blocks without data or JSON are skipped" {
+  let stream = [
+    "data: [DONE]\n\n",
+    "event: content_block_delta\n\n",
+    "event: content_block_delta\ndata: {broken\n\n",
+    "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"no name\"}}\n\n",
+    ev("content_block_delta", "{\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"a\"}}"),
+    "event: ping\nevent:  content_block_delta \ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"b\"}}\n\n"
+  ] |> list.join("")
+  let (j, deltas) = run_anthropic([stream])!
+  assert_eq(deltas, ["a", "b"])
+  assert(string.contains(j, "\"content\":\"ab\""))
+}
+
+test "anthropic: usage counts are replaced, never summed; a Float count truncates" {
+  let stream = ev(
+    "message_start",
+    "{\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":10.7,\"output_tokens\":3}}}",
+  ) + ev("message_delta", "{\"delta\":{},\"usage\":{\"output_tokens\":4}}") + ev(
+    "message_delta",
+    "{\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":6}}",
+  ) + ev("message_delta", "{\"delta\":{\"stop_reason\":\"\"}}")
+  let (j, _) = run_anthropic([stream])!
+  assert_eq(
+    j,
+    "{\"content\":\"\",\"model\":\"m\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":6,\"total_tokens\":16},\"finish_reason\":\"end_turn\",\"tool_calls\":[]}",
+  )
+}
+
+test "anthropic: input_json_delta opens a call even without content_block_start" {
+  let stream = ev(
+    "content_block_delta",
+    "{\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}",
+  ) + ev(
+    "content_block_start",
+    "{\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t0\",\"name\":\"\"}}",
+  )
+  let (j, _) = run_anthropic([stream])!
+  assert(string.ends_with(
+    j,
+    "\"tool_calls\":[{\"id\":\"t0\",\"name\":\"\",\"arguments\":\"\"},{\"id\":\"\",\"name\":\"\",\"arguments\":\"\"},{\"id\":\"\",\"name\":\"\",\"arguments\":\"{}\"}]}",
+  ))
+}
+
+test "anthropic: url and headers" {
+  assert_eq(anthropic.url("https://api.anthropic.com"), "https://api.anthropic.com/v1/messages")
+  assert_eq(anthropic.url("http://127.0.0.1:8080/"), "http://127.0.0.1:8080/v1/messages")
+  let h = anthropic.headers("sk-1")
+  assert_eq(map.get(h, "x-api-key"), some("sk-1"))
+  assert_eq(map.get(h, "anthropic-version"), some("2023-06-01"))
+  assert_eq(map.get(h, "Content-Type"), some("application/json"))
+  assert_eq(map.get(h, "Accept"), some("text/event-stream"))
+  assert_eq(map.len(h), 4)
+}
+
+// ── shared ──
+test "final JSON escapes control characters, quotes and backslashes" {
+  let acc = { ...sse.start().acc, content: "a\"b\\c\n\t\u{1}", model: "m/1" }
+  assert_eq(
+    sse.final_json(acc),
+    "{\"content\":\"a\\\"b\\\\c\\n\\t\\u0001\",\"model\":\"m/1\",\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0},\"finish_reason\":\"\",\"tool_calls\":[]}",
+  )
+}

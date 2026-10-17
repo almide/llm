@@ -1,0 +1,16 @@
+// A whole reply arriving in one read: thousands of events in a single chunk.
+import self.sse
+import self.openai
+import self.anthropic
+
+test "openai: 5000 events in one chunk" {
+  let one = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"
+  let s = openai.feed(sse.start(), list.repeat(one, 5000) |> list.join(""), (_) => ())
+  assert_eq(string.len(s.acc.content), 5000)
+}
+
+test "anthropic: 5000 events in one chunk" {
+  let one = "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n"
+  let s = anthropic.feed(sse.start(), list.repeat(one, 5000) |> list.join(""), (_) => ())
+  assert_eq(string.len(s.acc.content), 5000)
+}

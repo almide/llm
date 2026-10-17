@@ -1,0 +1,122 @@
+// anthropic — the Anthropic Messages SSE translation.
+//
+// Every event carries an `event:` line naming it and a `data:` payload:
+//
+//   message_start        {"message":{"model","usage":{"input_tokens","output_tokens"}}}
+//   content_block_start  {"index":N,"content_block":{"type":"text"|"tool_use","id","name"}}
+//   content_block_delta  {"index":N,"delta":{"type":"text_delta"|"input_json_delta","text"|"partial_json"}}
+//   message_delta        {"delta":{"stop_reason"},"usage":{"output_tokens"}}
+//   error                {"error":{"message"}}
+//
+// A tool_use block is a tool call at the block's `index` (so a text block
+// before it leaves an empty call in its slot); its arguments are the
+// concatenated `partial_json` fragments, and an inlined `input` is not read.
+// An error event reaches the callback as `[anthropic stream error] <message>`
+// and is not kept in the content. Any other event, a block with no data and
+// a payload that is not JSON are skipped. There is no `[DONE]`: the stream
+// ends when the connection does.
+import json
+import self.sse
+
+mod fn url(base_url: String) -> String = sse.endpoint(base_url, "/v1/messages")
+
+mod fn headers(api_key: String) -> Map[String, String] = [
+  "x-api-key": api_key,
+  "anthropic-version": "2023-06-01",
+  "Content-Type": "application/json",
+  "Accept": "text/event-stream"
+]
+
+/// One arrival: buffer it, take every whole event block, apply them in order.
+mod fn feed(s: sse.Stream, chunk: String, on_delta: (String) -> Unit) -> sse.Stream = {
+  let (blocks, rest) = sse.split_blocks(s.buffer + chunk, [])
+  { ...s, buffer: rest, acc: blocks |> list.fold(s.acc, (acc, b) => block(acc, b, on_delta)) }
+}
+
+local fn block(acc: sse.Acc, b: String, on_delta: (String) -> Unit) -> sse.Acc = {
+  let payload = sse.data(b)
+  if payload == "" then acc
+  else match json.parse(payload) {
+    err(_) => acc,
+    ok(v) => event(acc, sse.event_name(b), v, on_delta),
+  }
+}
+
+local fn event(acc: sse.Acc, name: String, v: Value, on_delta: (String) -> Unit) -> sse.Acc = match name {
+  "message_start" => message_start(acc, v),
+  "content_block_start" => block_start(acc, v),
+  "content_block_delta" => block_delta(acc, v, on_delta),
+  "message_delta" => message_delta(acc, v),
+  "error" => {
+    stream_error(v, on_delta)
+    acc
+  },
+  _ => acc,
+}
+
+local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match value.field(v, "message") {
+  err(_) => acc,
+  ok(msg) => {
+    let named = { ...acc, model: sse.set(acc.model, json.get_string(msg, "model")) }
+    match value.field(msg, "usage") {
+      err(_) => named,
+      ok(u) => { ...named, prompt: sse.int_field(u, "input_tokens") ?? named.prompt, completion: sse.int_field(
+        u,
+        "output_tokens",
+      ) ?? named.completion },
+    }
+  },
+}
+
+local fn block_start(acc: sse.Acc, v: Value) -> sse.Acc = match value.field(v, "content_block") {
+  ok(b) if (json.get_string(b, "type") ?? "") == "tool_use" => {
+    let index = sse.int_field(v, "index") ?? 0
+    let calls = sse.reach(acc.calls, index)
+    let c = sse.call_at(calls, index)
+    let opened = { ...c, id: sse.set(c.id, json.get_string(b, "id")), name: sse.set(
+      c.name,
+      json.get_string(b, "name"),
+    ) }
+    { ...acc, calls: list.set(calls, index, opened) }
+  },
+  _ => acc,
+}
+
+local fn block_delta(acc: sse.Acc, v: Value, on_delta: (String) -> Unit) -> sse.Acc = match value.field(
+  v,
+  "delta",
+) {
+  err(_) => acc,
+  ok(delta) => match json.get_string(delta, "type") ?? "" {
+    "text_delta" => sse.text(acc, json.get_string(delta, "text"), on_delta),
+    "input_json_delta" => match json.get_string(delta, "partial_json") {
+      some(partial) => {
+        let index = sse.int_field(v, "index") ?? 0
+        let calls = sse.reach(acc.calls, index)
+        let c = sse.call_at(calls, index)
+        { ...acc, calls: list.set(calls, index, { ...c, arguments: c.arguments + partial }) }
+      },
+      none => acc,
+    },
+    _ => acc,
+  },
+}
+
+local fn message_delta(acc: sse.Acc, v: Value) -> sse.Acc = {
+  let finished = match value.field(v, "delta") {
+    ok(delta) => { ...acc, finish: sse.set(acc.finish, json.get_string(delta, "stop_reason")) },
+    err(_) => acc,
+  }
+  match value.field(v, "usage") {
+    ok(u) => { ...finished, completion: sse.int_field(u, "output_tokens") ?? finished.completion },
+    err(_) => finished,
+  }
+}
+
+local fn stream_error(v: Value, on_delta: (String) -> Unit) -> Unit = match value.field(v, "error") {
+  ok(e) => match json.get_string(e, "message") ?? "" {
+    "" => (),
+    msg => on_delta("[anthropic stream error] " + msg),
+  },
+  err(_) => (),
+}

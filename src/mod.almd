@@ -1,0 +1,87 @@
+// almide/llm — LLM provider streaming clients (OpenAI-compatible, Anthropic).
+//
+// Each call POSTs `body_json` to the provider, hands every text fragment to
+// `on_text_delta` as it arrives (for live rendering), and returns the whole
+// reply as one LLM-response JSON string, the same shape for both providers:
+//
+//   {"content":"...","model":"...","usage":{"prompt_tokens":N,
+//    "completion_tokens":N,"total_tokens":N},"finish_reason":"...",
+//    "tool_calls":[{"id":"...","name":"...","arguments":"..."}]}
+//
+// `body_json` must already ask for a stream (`"stream": true`). A non-2xx
+// status or a transport failure is the err of the underlying
+// `http.request_stream` (`HTTP 404: Not Found: <body>`, `could not connect
+// to ...`). The `_with_limits` twins stream through
+// `http.request_stream_with_limits`: `limits` bounds the whole call
+// (`total_ms`) and the longest silence (`idle_ms`), 0 = no limit, and a
+// fired limit is `err("request timeout: total_ms <n> exceeded")` /
+// `err("request timeout: idle_ms <n> exceeded")`.
+//
+// Formerly `http.openai_streaming_call` & co. in the stdlib (removed at
+// dialect epoch 14). The Anthropic calls gained a trailing `base_url`.
+import http
+import self.sse
+import self.openai
+import self.anthropic
+
+/// Streams base_url/chat/completions; LLM-response JSON.
+effect fn openai_streaming_call(base_url: String, api_key: String, body_json: String, on_text_delta: (String) -> Unit) -> String = {
+  var s = sse.start()
+  http.request_stream(
+    "POST",
+    openai.url(base_url),
+    body_json,
+    openai.headers(api_key),
+    (chunk) => {
+      s = openai.feed(s, chunk, on_text_delta)
+    },
+  )!
+  sse.final_json(s.acc)
+}
+
+/// openai_streaming_call bounded by per-call limits.
+effect fn openai_streaming_call_with_limits(base_url: String, api_key: String, body_json: String, limits: HttpLimits, on_text_delta: (String) -> Unit) -> String = {
+  var s = sse.start()
+  http.request_stream_with_limits(
+    "POST",
+    openai.url(base_url),
+    body_json,
+    openai.headers(api_key),
+    limits,
+    (chunk) => {
+      s = openai.feed(s, chunk, on_text_delta)
+    },
+  )!
+  sse.final_json(s.acc)
+}
+
+/// Streams base_url/v1/messages (Anthropic Messages); LLM-response JSON.
+effect fn anthropic_streaming_call(api_key: String, body_json: String, on_text_delta: (String) -> Unit, base_url: String = "https://api.anthropic.com") -> String = {
+  var s = sse.start()
+  http.request_stream(
+    "POST",
+    anthropic.url(base_url),
+    body_json,
+    anthropic.headers(api_key),
+    (chunk) => {
+      s = anthropic.feed(s, chunk, on_text_delta)
+    },
+  )!
+  sse.final_json(s.acc)
+}
+
+/// anthropic_streaming_call bounded by per-call limits.
+effect fn anthropic_streaming_call_with_limits(api_key: String, body_json: String, limits: HttpLimits, on_text_delta: (String) -> Unit, base_url: String = "https://api.anthropic.com") -> String = {
+  var s = sse.start()
+  http.request_stream_with_limits(
+    "POST",
+    anthropic.url(base_url),
+    body_json,
+    anthropic.headers(api_key),
+    limits,
+    (chunk) => {
+      s = anthropic.feed(s, chunk, on_text_delta)
+    },
+  )!
+  sse.final_json(s.acc)
+}

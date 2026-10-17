@@ -1,0 +1,105 @@
+// sse — Server-Sent Events framing and the reply accumulator both providers
+// share.
+//
+// An event block ends at a blank line (`\n\n`). Its `data:` lines, leading
+// blanks trimmed and joined by `\n`, are one payload; its last `event:` line,
+// trimmed, is its name. A block may arrive split across any number of chunks:
+// the part after the last blank line waits in the buffer for the next one.
+//
+// The answer of every streaming call is the LLM-response JSON
+//
+//   {"content":"...","model":"...","usage":{"prompt_tokens":N,
+//    "completion_tokens":N,"total_tokens":N},"finish_reason":"...",
+//    "tool_calls":[{"id":"...","name":"...","arguments":"..."}]}
+import json
+
+/// One tool call: id and name arrive once, the arguments in fragments.
+mod type ToolCall = { id: String, name: String, arguments: String }
+
+/// What one streamed reply has accumulated so far, in either wire shape.
+mod type Acc = { content: String, calls: List[ToolCall], prompt: Int, completion: Int, total: Int, finish: String, model: String }
+
+/// A stream in progress: the unframed tail, whether it has ended, the reply.
+mod type Stream = { buffer: String, done: Bool, acc: Acc }
+
+// `base_url` without its trailing slashes, then `path`.
+mod fn endpoint(base_url: String, path: String) -> String = trim_end_slashes(base_url) + path
+
+local fn trim_end_slashes(s: String) -> String =
+  if string.ends_with(s, "/") then trim_end_slashes(string.drop_end(s, 1)) else s
+
+mod fn start() -> Stream = {
+  buffer: "",
+  done: false,
+  acc: { content: "", calls: [], prompt: 0, completion: 0, total: 0, finish: "", model: "" },
+}
+
+// Every whole event block at the head of `buf`, in order, and what is left
+// over.
+mod fn split_blocks(buf: String, blocks: List[String]) -> (List[String], String) = match string.index_of(
+  buf,
+  "\n\n",
+) {
+  none => (blocks, buf),
+  some(i) => split_blocks(string.drop(buf, i + 2), blocks + [string.take(buf, i + 2)]),
+}
+
+// A block's `data:` lines, leading blanks trimmed, joined by `\n` — no
+// separator while the payload is still empty.
+mod fn data(block: String) -> String = string.lines(block) |> list.filter_map((line) => string.strip_prefix(line, "data:")) |> list.fold(
+  "",
+  (acc, rest) => if acc == "" then string.trim_start(rest) else acc + "\n" + string.trim_start(rest),
+)
+
+// A block's last `event:` name, trimmed; "" when it has none.
+mod fn event_name(block: String) -> String = string.lines(block) |> list.filter_map((line) => string.strip_prefix(line, "event:")) |> list.last |> option.map((name) => string.trim(name)) ?? ""
+
+// `slot` replaced by `fresh` when that is present and non-empty.
+mod fn set(slot: String, fresh: String?) -> String = match fresh {
+  some(v) => if v == "" then slot else v,
+  none => slot,
+}
+
+// An Int field, or a Float one truncated toward zero.
+mod fn int_field(v: Value, key: String) -> Int? = match json.get_int(v, key) {
+  some(n) => some(n),
+  none => json.get_float(v, key) |> option.map((f) => float.to_int(f)),
+}
+
+// The tool-call list grown with empty calls until it reaches `index`.
+mod fn reach(calls: List[ToolCall], index: Int) -> List[ToolCall] =
+  if list.len(calls) > index then calls
+  else calls + list.repeat({ id: "", name: "", arguments: "" }, index + 1 - list.len(calls))
+
+// The call at `index`, after the list has been grown to reach it.
+mod fn call_at(calls: List[ToolCall], index: Int) -> ToolCall = list.get(calls, index) ?? {
+  id: "",
+  name: "",
+  arguments: "",
+}
+
+// A text delta: shown live through the callback and kept. An empty one is
+// neither.
+mod fn text(acc: Acc, fresh: String?, on_delta: (String) -> Unit) -> Acc = match fresh {
+  some(t) if t != "" => {
+    on_delta(t)
+    { ...acc, content: acc.content + t }
+  },
+  _ => acc,
+}
+
+// JSON string-content escaping: the runtime's one rule, through
+// value.stringify.
+local fn esc(s: String) -> String = {
+  let quoted = value.stringify(value.str(s))
+  string.slice(quoted, 1, string.len(quoted) - 1)
+}
+
+// The LLM-response JSON. A stream that reported no total (Anthropic never
+// does) totals the two counts.
+mod fn final_json(acc: Acc) -> String = {
+  let calls = acc.calls |> list.map((c) => "{\"id\":\"${esc(c.id)}\",\"name\":\"${esc(c.name)}\",\"arguments\":\"${esc(c.arguments)}\"}") |> list.join(",")
+  let total = if acc.total != 0 then acc.total
+  else acc.prompt + acc.completion
+  "{\"content\":\"${esc(acc.content)}\",\"model\":\"${esc(acc.model)}\",\"usage\":{\"prompt_tokens\":${int.to_string(acc.prompt)},\"completion_tokens\":${int.to_string(acc.completion)},\"total_tokens\":${int.to_string(total)}},\"finish_reason\":\"${esc(acc.finish)}\",\"tool_calls\":[${calls}]}"
+}
