@@ -2,7 +2,7 @@
 
 Streaming clients for LLM providers, for [Almide](https://github.com/almide/almide): the OpenAI-compatible `/chat/completions` API and the Anthropic Messages API. Each call streams the reply, hands every text fragment to a callback as it arrives, and returns the whole reply as one JSON string with the same shape for both providers.
 
-Pure Almide, built on the stdlib's `http.request_stream` and `http.request_stream_with_limits`. No native code.
+Pure Almide, built on the stdlib's http call handle (`http.start`, then `http.read_new` between `http.poll`s). No native code.
 
 ## Install
 
@@ -75,7 +75,7 @@ Both providers answer the same LLM-response JSON:
 - OpenAI: `data: [DONE]` ends the stream; nothing after it is applied. Payloads that are not JSON are skipped.
 - Anthropic: `input_tokens` / `output_tokens` become `prompt_tokens` / `completion_tokens`, `stop_reason` becomes `finish_reason`. A `tool_use` block is the tool call at the block's `index`, so a text block before it leaves an empty call (`{"id":"","name":"","arguments":""}`) in its slot. An `error` event goes to the callback as `[anthropic stream error] <message>` and is not added to `content`.
 
-A non-2xx status or a transport failure is the err of the underlying stdlib client (`HTTP 404: Not Found: <body>`, `could not connect to ...`). A fired limit is `request timeout: total_ms <n> exceeded` or `request timeout: idle_ms <n> exceeded`.
+A non-2xx status is `HTTP <status>: <body>` (for example `HTTP 404: <body>`), and a transport failure is the err of the stdlib call handle (`could not connect to ...`). A fired limit is `request timeout: total_ms <n> exceeded` or `request timeout: idle_ms <n> exceeded`.
 
 ## API
 
@@ -90,7 +90,7 @@ OpenAI requests go to `<base_url>/chat/completions` with `Authorization: Bearer 
 
 ## Targets
 
-Native (`almide run`, `almide build`) serves all four. `almide run --target wasm` serves the two `_with_limits` twins, which stream through the http call handle; the plain calls stream through `http.request_stream`, which has no wasm host yet, so a wasm program that calls them is refused with E081 at compile time. The stock wasm artifact (`almide build --target wasm`) has no http streaming host at all.
+Native (`almide run`, `almide build`) serves all four. `almide run --target wasm` serves all four too: every call streams through the http call handle, which the embedded host runs. The stock wasm artifact (`almide build --target wasm`) has no http streaming host at all.
 
 ## Migrating from the stdlib (dialect epoch 14)
 

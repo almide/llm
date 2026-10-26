@@ -9,29 +9,57 @@
 //    "tool_calls":[{"id":"...","name":"...","arguments":"..."}]}
 //
 // `body_json` must already ask for a stream (`"stream": true`). A non-2xx
-// status or a transport failure is the err of the underlying
-// `http.request_stream` (`HTTP 404: Not Found: <body>`, `could not connect
-// to ...`). The `_with_limits` twins stream through
-// `http.request_stream_with_limits`: `limits` bounds the whole call
-// (`total_ms`) and the longest silence (`idle_ms`), 0 = no limit, and a
-// fired limit is `err("request timeout: total_ms <n> exceeded")` /
-// `err("request timeout: idle_ms <n> exceeded")`.
+// status is `err("HTTP <status>: <body>")` and a transport failure is the
+// err of the stdlib call handle (`could not connect to ...`). Every call
+// streams through `http.start` and reads the body with `http.read_new`
+// between `http.poll`s. The `_with_limits` twins pass `limits`: it bounds
+// the whole call (`total_ms`) and the longest silence (`idle_ms`), 0 = no
+// limit, and a fired limit is `err("request timeout: total_ms <n> exceeded")`
+// / `err("request timeout: idle_ms <n> exceeded")`.
 //
 // Formerly `http.openai_streaming_call` & co. in the stdlib (removed at
 // dialect epoch 14). The Anthropic calls gained a trailing `base_url`.
+import env
 import http
 import self.sse
 import self.openai
 import self.anthropic
 
+// POST `body` and hand every body fragment to `on_chunk` as it arrives; a
+// non-2xx status is an err.
+local effect fn stream(url: String, body: String, headers: List[(String, String)], limits: HttpLimits, on_chunk: (String) -> Unit) -> Result[Unit, String] = {
+  let c = http.start(http.new_request("POST", url, body, headers), limits)!
+  var running = true
+  var outcome: Result[Unit, String] = ok(())
+  while running {
+    let fresh = http.read_new(c)
+    if fresh != "" then on_chunk(fresh) else ()
+    match http.poll(c) {
+      none => env.sleep_ms(5),
+      some(ok(resp)) => {
+        let rest = http.read_new(c)
+        if rest != "" then on_chunk(rest) else ()
+        let code = http.status(resp)
+        outcome = if code >= 200 and code < 300 then ok(()) else err("HTTP ${code}: ${http.body(resp)}")
+        running = false
+      },
+      some(err(e)) => {
+        outcome = err(e)
+        running = false
+      },
+    }
+  }
+  outcome
+}
+
 /// Streams base_url/chat/completions; LLM-response JSON.
 effect fn openai_streaming_call(base_url: String, api_key: String, body_json: String, on_text_delta: (String) -> Unit) -> String = {
   var s = sse.start()
-  http.request_stream(
-    "POST",
+  stream(
     openai.url(base_url),
     body_json,
     openai.headers(api_key),
+    { total_ms: 0, idle_ms: 0 },
     (chunk) => {
       s = openai.feed(s, chunk, on_text_delta)
     },
@@ -42,8 +70,7 @@ effect fn openai_streaming_call(base_url: String, api_key: String, body_json: St
 /// openai_streaming_call bounded by per-call limits.
 effect fn openai_streaming_call_with_limits(base_url: String, api_key: String, body_json: String, limits: HttpLimits, on_text_delta: (String) -> Unit) -> String = {
   var s = sse.start()
-  http.request_stream_with_limits(
-    "POST",
+  stream(
     openai.url(base_url),
     body_json,
     openai.headers(api_key),
@@ -58,11 +85,11 @@ effect fn openai_streaming_call_with_limits(base_url: String, api_key: String, b
 /// Streams base_url/v1/messages (Anthropic Messages); LLM-response JSON.
 effect fn anthropic_streaming_call(api_key: String, body_json: String, on_text_delta: (String) -> Unit, base_url: String = "https://api.anthropic.com") -> String = {
   var s = sse.start()
-  http.request_stream(
-    "POST",
+  stream(
     anthropic.url(base_url),
     body_json,
     anthropic.headers(api_key),
+    { total_ms: 0, idle_ms: 0 },
     (chunk) => {
       s = anthropic.feed(s, chunk, on_text_delta)
     },
@@ -73,8 +100,7 @@ effect fn anthropic_streaming_call(api_key: String, body_json: String, on_text_d
 /// anthropic_streaming_call bounded by per-call limits.
 effect fn anthropic_streaming_call_with_limits(api_key: String, body_json: String, limits: HttpLimits, on_text_delta: (String) -> Unit, base_url: String = "https://api.anthropic.com") -> String = {
   var s = sse.start()
-  http.request_stream_with_limits(
-    "POST",
+  stream(
     anthropic.url(base_url),
     body_json,
     anthropic.headers(api_key),

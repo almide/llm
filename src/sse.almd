@@ -61,9 +61,9 @@ mod fn set(slot: String, fresh: String?) -> String = match fresh {
 }
 
 // An Int field, or a Float one truncated toward zero.
-mod fn int_field(v: Value, key: String) -> Int? = match json.get_int(v, key) {
+mod fn int_field(v: Value, key: String) -> Int? = match value.get_int(v, key) {
   some(n) => some(n),
-  none => json.get_float(v, key) |> option.map((f) => float.to_int(f)),
+  none => value.get_float(v, key) |> option.map((f) => int.from_saturating(f)),
 }
 
 // The tool-call list grown with empty calls until it reaches `index`.
@@ -89,9 +89,9 @@ mod fn text(acc: Acc, fresh: String?, on_delta: (String) -> Unit) -> Acc = match
 }
 
 // JSON string-content escaping: the runtime's one rule, through
-// value.stringify.
+// json.stringify.
 local fn esc(s: String) -> String = {
-  let quoted = value.stringify(value.str(s))
+  let quoted = json.stringify(value.string(s))
   string.slice(quoted, 1, string.len(quoted) - 1)
 }
 

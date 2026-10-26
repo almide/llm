@@ -10,7 +10,7 @@ import self.sse
 
 mod fn url(base_url: String) -> String = sse.endpoint(base_url, "/chat/completions")
 
-mod fn headers(api_key: String) -> Map[String, String] = ["Authorization": "Bearer " + api_key, "Content-Type": "application/json", "Accept": "text/event-stream"]
+mod fn headers(api_key: String) -> List[(String, String)] = [("Authorization", "Bearer " + api_key), ("Content-Type", "application/json"), ("Accept", "text/event-stream")]
 
 /// One arrival: buffer it, take every whole event block, apply their
 /// payloads in order up to `[DONE]`.
@@ -30,15 +30,15 @@ mod fn feed(s: sse.Stream, chunk: String, on_delta: (String) -> Unit) -> sse.Str
 local fn event(acc: sse.Acc, payload: String, on_delta: (String) -> Unit) -> sse.Acc = match json.parse(payload) {
   err(_) => acc,
   ok(v) => {
-    let named = { ...acc, model: sse.set(acc.model, json.get_string(v, "model")) }
-    let counted = match value.field(v, "usage") {
-      ok(u) => { ...named, prompt: sse.int_field(u, "prompt_tokens") ?? named.prompt, completion: sse.int_field(
+    let named = { ...acc, model: sse.set(acc.model, value.get_string(v, "model")) }
+    let counted = match value.get(v, "usage") {
+      some(u) => { ...named, prompt: sse.int_field(u, "prompt_tokens") ?? named.prompt, completion: sse.int_field(
         u,
         "completion_tokens",
       ) ?? named.completion, total: sse.int_field(u, "total_tokens") ?? named.total },
-      err(_) => named,
+      none => named,
     }
-    match list.get(json.get_array(v, "choices") ?? [], 0) {
+    match list.get(value.get_array(v, "choices") ?? [], 0) {
       some(first) => choice(counted, first, on_delta),
       none => counted,
     }
@@ -46,11 +46,11 @@ local fn event(acc: sse.Acc, payload: String, on_delta: (String) -> Unit) -> sse
 }
 
 local fn choice(acc: sse.Acc, c: Value, on_delta: (String) -> Unit) -> sse.Acc = {
-  let finished = { ...acc, finish: sse.set(acc.finish, json.get_string(c, "finish_reason")) }
-  match value.field(c, "delta") {
-    err(_) => finished,
-    ok(delta) => (json.get_array(delta, "tool_calls") ?? []) |> list.fold(
-      sse.text(finished, json.get_string(delta, "content"), on_delta),
+  let finished = { ...acc, finish: sse.set(acc.finish, value.get_string(c, "finish_reason")) }
+  match value.get(c, "delta") {
+    none => finished,
+    some(delta) => (value.get_array(delta, "tool_calls") ?? []) |> list.fold(
+      sse.text(finished, value.get_string(delta, "content"), on_delta),
       (a, tc) => tool(a, tc),
     ),
   }
@@ -61,13 +61,10 @@ local fn tool(acc: sse.Acc, tc: Value) -> sse.Acc = {
   let index = sse.int_field(tc, "index") ?? 0
   let calls = sse.reach(acc.calls, index)
   let c = sse.call_at(calls, index)
-  let named = { ...c, id: sse.set(c.id, json.get_string(tc, "id")) }
-  let entry = match value.field(tc, "function") {
-    ok(f) => { ...named, name: sse.set(named.name, json.get_string(f, "name")), arguments: named.arguments + (json.get_string(
-      f,
-      "arguments",
-    ) ?? "") },
-    err(_) => named,
+  let named = { ...c, id: sse.set(c.id, value.get_string(tc, "id")) }
+  let entry = match value.get(tc, "function") {
+    some(f) => { ...named, name: sse.set(named.name, value.get_string(f, "name")), arguments: named.arguments + (value.get_string(f, "arguments") ?? "") },
+    none => named,
   }
   { ...acc, calls: list.set(calls, index, entry) }
 }

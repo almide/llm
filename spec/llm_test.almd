@@ -31,7 +31,7 @@ effect fn run_anthropic(chunks: List[String]) -> (String, List[String]) = drive(
 )!
 
 // One codepoint per chunk.
-fn by_char(s: String) -> List[String] = string.chars(s)
+fn by_char(s: String) -> List[String] = string.to_list(s)
 
 // Cut at each codepoint offset in `cuts` (ascending).
 fn cut_at(s: String, cuts: List[Int]) -> List[String] = {

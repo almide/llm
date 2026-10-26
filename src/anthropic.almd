@@ -20,11 +20,11 @@ import self.sse
 
 mod fn url(base_url: String) -> String = sse.endpoint(base_url, "/v1/messages")
 
-mod fn headers(api_key: String) -> Map[String, String] = [
-  "x-api-key": api_key,
-  "anthropic-version": "2023-06-01",
-  "Content-Type": "application/json",
-  "Accept": "text/event-stream"
+mod fn headers(api_key: String) -> List[(String, String)] = [
+  ("x-api-key", api_key),
+  ("anthropic-version", "2023-06-01"),
+  ("Content-Type", "application/json"),
+  ("Accept", "text/event-stream"),
 ]
 
 /// One arrival: buffer it, take every whole event block, apply them in order.
@@ -54,13 +54,13 @@ local fn event(acc: sse.Acc, name: String, v: Value, on_delta: (String) -> Unit)
   _ => acc,
 }
 
-local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match value.field(v, "message") {
-  err(_) => acc,
-  ok(msg) => {
-    let named = { ...acc, model: sse.set(acc.model, json.get_string(msg, "model")) }
-    match value.field(msg, "usage") {
-      err(_) => named,
-      ok(u) => { ...named, prompt: sse.int_field(u, "input_tokens") ?? named.prompt, completion: sse.int_field(
+local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match value.get(v, "message") {
+  none => acc,
+  some(msg) => {
+    let named = { ...acc, model: sse.set(acc.model, value.get_string(msg, "model")) }
+    match value.get(msg, "usage") {
+      none => named,
+      some(u) => { ...named, prompt: sse.int_field(u, "input_tokens") ?? named.prompt, completion: sse.int_field(
         u,
         "output_tokens",
       ) ?? named.completion },
@@ -68,28 +68,25 @@ local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match value.field(v,
   },
 }
 
-local fn block_start(acc: sse.Acc, v: Value) -> sse.Acc = match value.field(v, "content_block") {
-  ok(b) if (json.get_string(b, "type") ?? "") == "tool_use" => {
+local fn block_start(acc: sse.Acc, v: Value) -> sse.Acc = match value.get(v, "content_block") {
+  some(b) if (value.get_string(b, "type") ?? "") == "tool_use" => {
     let index = sse.int_field(v, "index") ?? 0
     let calls = sse.reach(acc.calls, index)
     let c = sse.call_at(calls, index)
-    let opened = { ...c, id: sse.set(c.id, json.get_string(b, "id")), name: sse.set(
+    let opened = { ...c, id: sse.set(c.id, value.get_string(b, "id")), name: sse.set(
       c.name,
-      json.get_string(b, "name"),
+      value.get_string(b, "name"),
     ) }
     { ...acc, calls: list.set(calls, index, opened) }
   },
   _ => acc,
 }
 
-local fn block_delta(acc: sse.Acc, v: Value, on_delta: (String) -> Unit) -> sse.Acc = match value.field(
-  v,
-  "delta",
-) {
-  err(_) => acc,
-  ok(delta) => match json.get_string(delta, "type") ?? "" {
-    "text_delta" => sse.text(acc, json.get_string(delta, "text"), on_delta),
-    "input_json_delta" => match json.get_string(delta, "partial_json") {
+local fn block_delta(acc: sse.Acc, v: Value, on_delta: (String) -> Unit) -> sse.Acc = match value.get(v, "delta") {
+  none => acc,
+  some(delta) => match value.get_string(delta, "type") ?? "" {
+    "text_delta" => sse.text(acc, value.get_string(delta, "text"), on_delta),
+    "input_json_delta" => match value.get_string(delta, "partial_json") {
       some(partial) => {
         let index = sse.int_field(v, "index") ?? 0
         let calls = sse.reach(acc.calls, index)
@@ -103,20 +100,20 @@ local fn block_delta(acc: sse.Acc, v: Value, on_delta: (String) -> Unit) -> sse.
 }
 
 local fn message_delta(acc: sse.Acc, v: Value) -> sse.Acc = {
-  let finished = match value.field(v, "delta") {
-    ok(delta) => { ...acc, finish: sse.set(acc.finish, json.get_string(delta, "stop_reason")) },
-    err(_) => acc,
+  let finished = match value.get(v, "delta") {
+    some(delta) => { ...acc, finish: sse.set(acc.finish, value.get_string(delta, "stop_reason")) },
+    none => acc,
   }
-  match value.field(v, "usage") {
-    ok(u) => { ...finished, completion: sse.int_field(u, "output_tokens") ?? finished.completion },
-    err(_) => finished,
+  match value.get(v, "usage") {
+    some(u) => { ...finished, completion: sse.int_field(u, "output_tokens") ?? finished.completion },
+    none => finished,
   }
 }
 
-local fn stream_error(v: Value, on_delta: (String) -> Unit) -> Unit = match value.field(v, "error") {
-  ok(e) => match json.get_string(e, "message") ?? "" {
+local fn stream_error(v: Value, on_delta: (String) -> Unit) -> Unit = match value.get(v, "error") {
+  some(e) => match value.get_string(e, "message") ?? "" {
     "" => (),
     msg => on_delta("[anthropic stream error] " + msg),
   },
-  err(_) => (),
+  none => (),
 }
