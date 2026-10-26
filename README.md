@@ -7,14 +7,14 @@ Pure Almide, built on the stdlib's http call handle (`http.start`, then `http.re
 ## Install
 
 ```bash
-almide add almide/llm@v0.1.0
+almide add almide/llm@v0.2.0
 ```
 
 This adds the dependency to your `almide.toml`:
 
 ```toml
 [dependencies]
-llm = { git = "https://github.com/almide/llm", tag = "v0.1.0" }
+llm = { git = "https://github.com/almide/llm", tag = "v0.2.0" }
 ```
 
 ## Usage
