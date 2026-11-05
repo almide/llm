@@ -89,7 +89,7 @@ mod fn text(acc: Acc, fresh: String?, on_delta: (String) -> Unit) -> Acc = match
 }
 
 // JSON string-content escaping: the runtime's one rule, through
-// value.stringify.
+// json.stringify.
 local fn esc(s: String) -> String = {
   let quoted = json.stringify(value.string(s))
   string.slice(quoted, 1, string.len(quoted) - 1)

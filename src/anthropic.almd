@@ -20,12 +20,7 @@ import self.sse
 
 mod fn url(base_url: String) -> String = sse.endpoint(base_url, "/v1/messages")
 
-mod fn headers(api_key: String) -> Map[String, String] = [
-  "x-api-key": api_key,
-  "anthropic-version": "2023-06-01",
-  "Content-Type": "application/json",
-  "Accept": "text/event-stream"
-]
+mod fn headers(api_key: String) -> List[(String, String)] = [("x-api-key", api_key), ("anthropic-version", "2023-06-01"), ("Content-Type", "application/json"), ("Accept", "text/event-stream")]
 
 /// One arrival: buffer it, take every whole event block, apply them in order.
 mod fn feed(s: sse.Stream, chunk: String, on_delta: (String) -> Unit) -> sse.Stream = {
@@ -54,16 +49,13 @@ local fn event(acc: sse.Acc, name: String, v: Value, on_delta: (String) -> Unit)
   _ => acc,
 }
 
-local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_result(
-  value.get(v, "message"),
-  "missing field 'message'",
-) {
-  err(_) => acc,
-  ok(msg) => {
+local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match value.get(v, "message") {
+  none => acc,
+  some(msg) => {
     let named = { ...acc, model: sse.set(acc.model, value.get_string(msg, "model")) }
-    match option.to_result(value.get(msg, "usage"), "missing field 'usage'") {
-      err(_) => named,
-      ok(u) => { ...named, prompt: sse.int_field(u, "input_tokens") ?? named.prompt, completion: sse.int_field(
+    match value.get(msg, "usage") {
+      none => named,
+      some(u) => { ...named, prompt: sse.int_field(u, "input_tokens") ?? named.prompt, completion: sse.int_field(
         u,
         "output_tokens",
       ) ?? named.completion },
@@ -71,11 +63,8 @@ local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_resu
   },
 }
 
-local fn block_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_result(
-  value.get(v, "content_block"),
-  "missing field 'content_block'",
-) {
-  ok(b) if (value.get_string(b, "type") ?? "") == "tool_use" => {
+local fn block_start(acc: sse.Acc, v: Value) -> sse.Acc = match value.get(v, "content_block") {
+  some(b) if (value.get_string(b, "type") ?? "") == "tool_use" => {
     let index = sse.int_field(v, "index") ?? 0
     let calls = sse.reach(acc.calls, index)
     let c = sse.call_at(calls, index)
@@ -88,12 +77,12 @@ local fn block_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_result
   _ => acc,
 }
 
-local fn block_delta(acc: sse.Acc, v: Value, on_delta: (String) -> Unit) -> sse.Acc = match option.to_result(
-  value.get(v, "delta"),
-  "missing field 'delta'",
+local fn block_delta(acc: sse.Acc, v: Value, on_delta: (String) -> Unit) -> sse.Acc = match value.get(
+  v,
+  "delta",
 ) {
-  err(_) => acc,
-  ok(delta) => match value.get_string(delta, "type") ?? "" {
+  none => acc,
+  some(delta) => match value.get_string(delta, "type") ?? "" {
     "text_delta" => sse.text(acc, value.get_string(delta, "text"), on_delta),
     "input_json_delta" => match value.get_string(delta, "partial_json") {
       some(partial) => {
@@ -109,23 +98,20 @@ local fn block_delta(acc: sse.Acc, v: Value, on_delta: (String) -> Unit) -> sse.
 }
 
 local fn message_delta(acc: sse.Acc, v: Value) -> sse.Acc = {
-  let finished = match option.to_result(value.get(v, "delta"), "missing field 'delta'") {
-    ok(delta) => { ...acc, finish: sse.set(acc.finish, value.get_string(delta, "stop_reason")) },
-    err(_) => acc,
+  let finished = match value.get(v, "delta") {
+    some(delta) => { ...acc, finish: sse.set(acc.finish, value.get_string(delta, "stop_reason")) },
+    none => acc,
   }
-  match option.to_result(value.get(v, "usage"), "missing field 'usage'") {
-    ok(u) => { ...finished, completion: sse.int_field(u, "output_tokens") ?? finished.completion },
-    err(_) => finished,
+  match value.get(v, "usage") {
+    some(u) => { ...finished, completion: sse.int_field(u, "output_tokens") ?? finished.completion },
+    none => finished,
   }
 }
 
-local fn stream_error(v: Value, on_delta: (String) -> Unit) -> Unit = match option.to_result(
-  value.get(v, "error"),
-  "missing field 'error'",
-) {
-  ok(e) => match value.get_string(e, "message") ?? "" {
+local fn stream_error(v: Value, on_delta: (String) -> Unit) -> Unit = match value.get(v, "error") {
+  some(e) => match value.get_string(e, "message") ?? "" {
     "" => (),
     msg => on_delta("[anthropic stream error] " + msg),
   },
-  err(_) => (),
+  none => (),
 }
