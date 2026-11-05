@@ -63,7 +63,10 @@ local fn tool(acc: sse.Acc, tc: Value) -> sse.Acc = {
   let c = sse.call_at(calls, index)
   let named = { ...c, id: sse.set(c.id, value.get_string(tc, "id")) }
   let entry = match option.to_result(value.get(tc, "function"), "missing field 'function'") {
-    ok(f) => { ...named, name: sse.set(named.name, value.get_string(f, "name")), arguments: named.arguments + (value.get_string(f, "arguments", ) ?? "") },
+    ok(f) => { ...named, name: sse.set(named.name, value.get_string(f, "name")), arguments: named.arguments + (value.get_string(
+      f,
+      "arguments",
+    ) ?? "") },
     err(_) => named,
   }
   { ...acc, calls: list.set(calls, index, entry) }

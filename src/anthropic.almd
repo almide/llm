@@ -54,7 +54,10 @@ local fn event(acc: sse.Acc, name: String, v: Value, on_delta: (String) -> Unit)
   _ => acc,
 }
 
-local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_result(value.get(v, "message"), "missing field 'message'") {
+local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_result(
+  value.get(v, "message"),
+  "missing field 'message'",
+) {
   err(_) => acc,
   ok(msg) => {
     let named = { ...acc, model: sse.set(acc.model, value.get_string(msg, "model")) }
@@ -68,7 +71,10 @@ local fn message_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_resu
   },
 }
 
-local fn block_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_result(value.get(v, "content_block"), "missing field 'content_block'") {
+local fn block_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_result(
+  value.get(v, "content_block"),
+  "missing field 'content_block'",
+) {
   ok(b) if (value.get_string(b, "type") ?? "") == "tool_use" => {
     let index = sse.int_field(v, "index") ?? 0
     let calls = sse.reach(acc.calls, index)
@@ -82,7 +88,10 @@ local fn block_start(acc: sse.Acc, v: Value) -> sse.Acc = match option.to_result
   _ => acc,
 }
 
-local fn block_delta(acc: sse.Acc, v: Value, on_delta: (String) -> Unit) -> sse.Acc = match option.to_result(value.get(v, "delta"), "missing field 'delta'") {
+local fn block_delta(acc: sse.Acc, v: Value, on_delta: (String) -> Unit) -> sse.Acc = match option.to_result(
+  value.get(v, "delta"),
+  "missing field 'delta'",
+) {
   err(_) => acc,
   ok(delta) => match value.get_string(delta, "type") ?? "" {
     "text_delta" => sse.text(acc, value.get_string(delta, "text"), on_delta),
@@ -110,7 +119,10 @@ local fn message_delta(acc: sse.Acc, v: Value) -> sse.Acc = {
   }
 }
 
-local fn stream_error(v: Value, on_delta: (String) -> Unit) -> Unit = match option.to_result(value.get(v, "error"), "missing field 'error'") {
+local fn stream_error(v: Value, on_delta: (String) -> Unit) -> Unit = match option.to_result(
+  value.get(v, "error"),
+  "missing field 'error'",
+) {
   ok(e) => match value.get_string(e, "message") ?? "" {
     "" => (),
     msg => on_delta("[anthropic stream error] " + msg),
