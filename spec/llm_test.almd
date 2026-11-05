@@ -127,7 +127,7 @@ test "openai: CRLF line endings frame data lines" {
 test "openai: url and headers" {
   assert_eq(openai.url("http://h/v1//"), "http://h/v1/chat/completions")
   assert_eq(openai.url("https://api.openai.com/v1"), "https://api.openai.com/v1/chat/completions")
-  let h = openai.headers("k-1")
+  let h = map.from_list(openai.headers("k-1"))
   assert_eq(map.get(h, "Authorization"), some("Bearer k-1"))
   assert_eq(map.get(h, "Content-Type"), some("application/json"))
   assert_eq(map.get(h, "Accept"), some("text/event-stream"))
@@ -255,7 +255,7 @@ test "anthropic: input_json_delta opens a call even without content_block_start"
 test "anthropic: url and headers" {
   assert_eq(anthropic.url("https://api.anthropic.com"), "https://api.anthropic.com/v1/messages")
   assert_eq(anthropic.url("http://127.0.0.1:8080/"), "http://127.0.0.1:8080/v1/messages")
-  let h = anthropic.headers("sk-1")
+  let h = map.from_list(anthropic.headers("sk-1"))
   assert_eq(map.get(h, "x-api-key"), some("sk-1"))
   assert_eq(map.get(h, "anthropic-version"), some("2023-06-01"))
   assert_eq(map.get(h, "Content-Type"), some("application/json"))
