@@ -30,15 +30,15 @@ mod fn feed(s: sse.Stream, chunk: String, on_delta: (String) -> Unit) -> sse.Str
 local fn event(acc: sse.Acc, payload: String, on_delta: (String) -> Unit) -> sse.Acc = match json.parse(payload) {
   err(_) => acc,
   ok(v) => {
-    let named = { ...acc, model: sse.set(acc.model, json.get_string(v, "model")) }
-    let counted = match value.field(v, "usage") {
+    let named = { ...acc, model: sse.set(acc.model, value.get_string(v, "model")) }
+    let counted = match option.to_result(value.get(v, "usage"), "missing field 'usage'") {
       ok(u) => { ...named, prompt: sse.int_field(u, "prompt_tokens") ?? named.prompt, completion: sse.int_field(
         u,
         "completion_tokens",
       ) ?? named.completion, total: sse.int_field(u, "total_tokens") ?? named.total },
       err(_) => named,
     }
-    match list.get(json.get_array(v, "choices") ?? [], 0) {
+    match list.get(value.get_array(v, "choices") ?? [], 0) {
       some(first) => choice(counted, first, on_delta),
       none => counted,
     }
@@ -46,11 +46,11 @@ local fn event(acc: sse.Acc, payload: String, on_delta: (String) -> Unit) -> sse
 }
 
 local fn choice(acc: sse.Acc, c: Value, on_delta: (String) -> Unit) -> sse.Acc = {
-  let finished = { ...acc, finish: sse.set(acc.finish, json.get_string(c, "finish_reason")) }
-  match value.field(c, "delta") {
+  let finished = { ...acc, finish: sse.set(acc.finish, value.get_string(c, "finish_reason")) }
+  match option.to_result(value.get(c, "delta"), "missing field 'delta'") {
     err(_) => finished,
-    ok(delta) => (json.get_array(delta, "tool_calls") ?? []) |> list.fold(
-      sse.text(finished, json.get_string(delta, "content"), on_delta),
+    ok(delta) => (value.get_array(delta, "tool_calls") ?? []) |> list.fold(
+      sse.text(finished, value.get_string(delta, "content"), on_delta),
       (a, tc) => tool(a, tc),
     ),
   }
@@ -61,12 +61,9 @@ local fn tool(acc: sse.Acc, tc: Value) -> sse.Acc = {
   let index = sse.int_field(tc, "index") ?? 0
   let calls = sse.reach(acc.calls, index)
   let c = sse.call_at(calls, index)
-  let named = { ...c, id: sse.set(c.id, json.get_string(tc, "id")) }
-  let entry = match value.field(tc, "function") {
-    ok(f) => { ...named, name: sse.set(named.name, json.get_string(f, "name")), arguments: named.arguments + (json.get_string(
-      f,
-      "arguments",
-    ) ?? "") },
+  let named = { ...c, id: sse.set(c.id, value.get_string(tc, "id")) }
+  let entry = match option.to_result(value.get(tc, "function"), "missing field 'function'") {
+    ok(f) => { ...named, name: sse.set(named.name, value.get_string(f, "name")), arguments: named.arguments + (value.get_string(f, "arguments", ) ?? "") },
     err(_) => named,
   }
   { ...acc, calls: list.set(calls, index, entry) }
